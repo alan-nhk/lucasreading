@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>3 秒平均分貝（0 dB校準 + 超標提示 + 常亮 + 圖表）</title>
+  <title>3 秒平均分貝（0 dB校準 + 超標提示 + 常亮 + 折線圖）</title>
   <style>
     :root { color-scheme: dark; }
     body { font-family: -apple-system, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial, sans-serif; margin:0; padding:24px; background:#0b0f14; color:#e6eef7; }
@@ -16,17 +16,17 @@
     button.secondary { background:#455a64; }
     button.ghost { background:transparent; border:1px solid #2b3b53; color:#e6eef7; }
     select { background:#121821; border:1px solid #223047; color:#e6eef7; }
-    .panel { background:#121821; border:1px solid #223047; border-radius:16px; padding:16px; transition:background 0.3s, border-color 0.3s; }
+    .panel { background:#121821; border:1px solid #223047; border-radius:16px; padding:16px; transition:background .3s, border-color .3s; }
     .panel.alert { background:#8d6e00; border-color:#ffeb3b; }
-    .big { font-size:44px; font-weight:700; letter-spacing:0.5px; }
-    .label { opacity:0.8; font-size:14px; }
+    .big { font-size:44px; font-weight:700; letter-spacing:.5px; }
+    .label { opacity:.8; font-size:14px; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
-    .hint { font-size:13px; opacity:0.75; margin-top:10px; line-height:1.45; }
+    .hint { font-size:13px; opacity:.75; margin-top:10px; line-height:1.45; }
     .ok { color:#80cbc4; }
     .warn { color:#ffab91; }
     .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #2b3b53; margin-left:6px; }
     .flash { box-shadow:0 0 0 3px rgba(255,87,34,.45) inset; }
-    canvas { display:block; width:100%; height:150px; margin-top:16px; border:1px solid #223047; border-radius:8px; background:#0b0f14; }
+    canvas { display:block; width:100%; height:160px; margin-top:16px; border:1px solid #223047; border-radius:8px; background:#0b0f14; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -35,6 +35,7 @@
 
   <div class="row">
     <button id="startBtn">開始量度</button>
+    <button id="stopBtn" class="secondary" disabled>停止量度</button>
     <button id="calBtn" class="secondary" disabled>重新校準（1 秒）</button>
     <select id="threshSel" title="超標提示閾值" disabled>
       <option value="15" selected>提示：15 dB</option>
@@ -44,6 +45,7 @@
     </select>
     <button id="alertToggle" class="ghost" disabled>🔔 提示已關</button>
     <button id="wakeToggle" class="ghost">💡 螢幕常亮：關</button>
+    <button id="downloadCsv" class="ghost" disabled>⬇️ 匯出CSV</button>
   </div>
 
   <div id="panel" class="panel">
@@ -61,34 +63,38 @@
   <canvas id="dbChart"></canvas>
 
   <div class="hint">
-    • 第一次開始會自動校準 1 秒，把當前環境定為 <b>0 dB</b>。<br/>
-    • 當你按「🔔 提示已開」時，會 **立即重新校準背景音量為 0 dB並清空圖表資料**。<br/>
-    • 若 3 秒平均超過所選閾值（相對於 0 dB）會播放提示聲、背景變黃、並在折線圖中反映變化。<br/>
-    • 「螢幕常亮」需手動開啟；部分瀏覽器或裝置可能不支援。<br/>
-    • 手機麥克風並非專業儀器，讀數僅作相對比較與教育用途。
+    • 按「開始量度」即時清空圖表並開始從 0 秒記錄，每秒加入 1 點，直到「停止量度」。<br/>
+    • 按「🔔 提示已開」會立即重新校準背景為 0 dB，並清空圖表。<br/>
+    • 圖上以黃色虛線表示當前提示分貝閾值。<br/>
+    • 「螢幕常亮」需手動開啟；手機麥克風數值供相對比較。
   </div>
 
   <script>
-    const startBtn   = document.getElementById('startBtn');
-    const calBtn     = document.getElementById('calBtn');
-    const dbOut      = document.getElementById('dbOut');
-    const statusEl   = document.getElementById('status');
-    const calBadge   = document.getElementById('calBadge');
-    const panelEl    = document.getElementById('panel');
-    const threshSel  = document.getElementById('threshSel');
-    const threshText = document.getElementById('threshLabel');
-    const alertToggle= document.getElementById('alertToggle');
-    const wakeToggle = document.getElementById('wakeToggle');
-    const canvas     = document.getElementById('dbChart');
-    const ctx        = canvas.getContext('2d');
+    const startBtn    = document.getElementById('startBtn');
+    const stopBtn     = document.getElementById('stopBtn');
+    const calBtn      = document.getElementById('calBtn');
+    const dbOut       = document.getElementById('dbOut');
+    const statusEl    = document.getElementById('status');
+    const calBadge    = document.getElementById('calBadge');
+    const panelEl     = document.getElementById('panel');
+    const threshSel   = document.getElementById('threshSel');
+    const threshText  = document.getElementById('threshLabel');
+    const alertToggle = document.getElementById('alertToggle');
+    const wakeToggle  = document.getElementById('wakeToggle');
+    const dlBtn       = document.getElementById('downloadCsv');
+
+    const canvas = document.getElementById('dbChart');
+    const ctx    = canvas.getContext('2d');
 
     let audioCtx, analyser, source, stream;
-    let refPower = null;
-    let isMeasuring = false;
-    const frameBuf = [];
-    const WINDOW_MS = 3000;
-    const CAL_MS = 1000;
-    let rafId = null;
+    let refPower = null;        // 0 dB 參考功率
+    let isRunning = false;      // 是否正在量度
+
+    const frameBuf = [];        // {t, p}
+    const WINDOW_MS = 3000;     // 3 秒滑動視窗
+    const CAL_MS    = 1000;     // 校準 1 秒
+
+    let rafId = null;           // animation frame id
 
     let alertEnabled = false;
     let thresholdDb = 15;
@@ -97,40 +103,42 @@
 
     let wakeLock = null;
 
-    const chartData = [];
-    const MAX_DATA_POINTS = 60; // 最近 60 個點（約 60 秒）
+    // 圖表與資料：每秒記錄一次（採樣 3 秒平均的 dB）
+    let startedAt = null;       // 起始時間（ms）
+    const csvRows = [['time_s','db']];  // 匯出用
+    let lastRecordSec = -1;     // 上次紀錄的整秒
 
-    // 設定 Chart.js 折線圖
+    // --- Threshold line plugin ---
+    const thresholdLine = {
+      id: 'thresholdLine',
+      beforeDraw: (chart, args, opts) => {
+        const { ctx, chartArea: { left, right, top, bottom }, scales:{ y } } = chart;
+        if (!y) return;
+        const yPos = y.getPixelForValue(thresholdDb);
+        ctx.save();
+        ctx.strokeStyle = '#ffeb3b';
+        ctx.lineWidth = 2; ctx.setLineDash([6,4]);
+        ctx.beginPath(); ctx.moveTo(left, yPos); ctx.lineTo(right, yPos); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = '#ffeb3b'; ctx.font = '12px sans-serif';
+        ctx.fillText(`閾值 ${thresholdDb} dB`, right-110, Math.max(top+12, yPos-6));
+        ctx.restore();
+      }
+    };
+
     const chart = new Chart(ctx, {
       type: 'line',
-      data: {
-        labels: [],
-        datasets: [{
-          label: '分貝 (dB)',
-          data: [],
-          borderColor: '#80cbc4',
-          backgroundColor: 'rgba(128,203,196,0.3)',
-          fill: true,
-          tension: 0.2,
-          pointRadius: 0
-        }]
-      },
+      data: { labels: [], datasets: [{ label:'dB', data: [], borderColor:'#80cbc4', backgroundColor:'rgba(128,203,196,.25)', fill:true, tension:.25, pointRadius:0 }] },
       options: {
         animation: false,
+        parsing: false,
         scales: {
-          x: {
-            title: { display: true, text: '時間 (秒)' }
-          },
-          y: {
-            title: { display: true, text: 'dB' },
-            suggestedMin: -50,
-            suggestedMax: 50
-          }
+          x: { title:{ display:true, text:'時間 (秒)' } },
+          y: { title:{ display:true, text:'dB' }, suggestedMin:-50, suggestedMax:50 }
         },
-        plugins: {
-          legend: { display: false }
-        }
-      }
+        plugins: { legend:{ display:false } }
+      },
+      plugins: [thresholdLine]
     });
 
     function toDbRel(power, refPwr) {
@@ -139,9 +147,7 @@
     }
 
     async function initAudio() {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }
-      });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false }});
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 2048;
@@ -153,10 +159,7 @@
       const buf = new Uint8Array(analyser.fftSize);
       analyser.getByteTimeDomainData(buf);
       let sumSq = 0;
-      for (let i=0; i<buf.length; i++){
-        const v = (buf[i]-128)/128;
-        sumSq += v*v;
-      }
+      for (let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sumSq += v*v; }
       const rms = Math.sqrt(sumSq / buf.length);
       return rms*rms;
     }
@@ -168,47 +171,36 @@
       return new Promise(resolve=>{
         function tick(){
           const now = performance.now();
-          const p = computeFramePower();
-          acc += p; n++;
-          if (now - tStart >= CAL_MS) {
+          const p = computeFramePower(); acc += p; n++;
+          if (now - tStart >= CAL_MS){
             const meanP = acc / Math.max(1,n);
             refPower = Math.max(meanP, 1e-12);
             statusEl.textContent = '已校準：0 dB';
             calBadge.textContent = '已校準';
             resolve();
-          } else {
-            requestAnimationFrame(tick);
-          }
+          } else { requestAnimationFrame(tick); }
         }
         requestAnimationFrame(tick);
       });
     }
 
-    function setThresholdUI(val) {
+    function setThresholdUI(val){
       thresholdDb = Number(val);
       threshText.textContent = `${thresholdDb} dB`;
-      threshText.classList.remove('ok','warn','bad');
-      if (thresholdDb <= 15)      threshText.classList.add('warn');
-      else                         threshText.classList.add('ok');
+      threshText.classList.remove('ok','warn');
+      if (thresholdDb <= 15) threshText.classList.add('warn'); else threshText.classList.add('ok');
+      chart.draw(); // 重新畫一次閾值線
     }
 
-    function flashPanel(){
-      panelEl.classList.add('flash');
-      setTimeout(()=>panelEl.classList.remove('flash'), 200);
-    }
+    function flashPanel(){ panelEl.classList.add('flash'); setTimeout(()=>panelEl.classList.remove('flash'),200); }
 
     function beep(){
       if (!audioCtx) return;
       const now = audioCtx.currentTime;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = 'square';
-      osc.frequency.setValueAtTime(1000, now);
-      gain.gain.setValueAtTime(0.5, now);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
-      osc.connect(gain).connect(audioCtx.destination);
-      osc.start(now);
-      osc.stop(now + 0.6);
+      const osc = audioCtx.createOscillator(); const gain = audioCtx.createGain();
+      osc.type='square'; osc.frequency.setValueAtTime(1000, now);
+      gain.gain.setValueAtTime(0.5, now); gain.gain.exponentialRampToValueAtTime(0.0001, now+0.5);
+      osc.connect(gain).connect(audioCtx.destination); osc.start(now); osc.stop(now+0.6);
     }
 
     function maybeAlert(db){
@@ -216,65 +208,54 @@
       const nowMs = performance.now();
       if (db >= thresholdDb){
         panelEl.classList.add('alert');
-        if ((nowMs - lastBeepAt) > BEEP_COOLDOWN_MS){
-          lastBeepAt = nowMs;
-          flashPanel();
-          beep();
-        }
-      } else {
-        panelEl.classList.remove('alert');
-      }
-    }
-
-    function updateChart(db) {
-      const labels = chart.data.labels;
-      const data   = chart.data.datasets[0].data;
-      // 加新點
-      labels.push(new Date().toLocaleTimeString().split(' ')[0]);
-      data.push(db);
-      if (data.length > MAX_DATA_POINTS){
-        labels.shift();
-        data.shift();
-      }
-      chart.update();
+        if ((nowMs - lastBeepAt) > BEEP_COOLDOWN_MS){ lastBeepAt = nowMs; flashPanel(); beep(); }
+      } else { panelEl.classList.remove('alert'); }
     }
 
     function loop(){
+      if (!isRunning) return; // 停止量度時不再 loop
       const now = performance.now();
       const p   = computeFramePower();
       frameBuf.push({ t: now, p });
-      while(frameBuf.length && (now - frameBuf[0].t) > WINDOW_MS) frameBuf.shift();
+      while (frameBuf.length && (now - frameBuf[0].t) > WINDOW_MS) frameBuf.shift();
 
-      let sum=0;
-      for(const it of frameBuf) sum += it.p;
+      let sum=0; for (const it of frameBuf) sum += it.p;
       const meanP = sum / Math.max(1, frameBuf.length);
 
       let db = 0.0;
-      if (refPower){
-        db = toDbRel(meanP, refPower);
-        if (!isFinite(db)) db = 0.0;
-      } else {
-        db = 0.0;
-      }
+      if (refPower){ db = toDbRel(meanP, refPower); if (!isFinite(db)) db = 0.0; }
       dbOut.textContent = `${db.toFixed(1)} dB`;
 
-      updateChart(db);
-      maybeAlert(db);
+      // — 每秒紀錄一次到圖表與 CSV
+      if (startedAt !== null){
+        const elapsedSec = Math.floor((now - startedAt)/1000);
+        if (elapsedSec !== lastRecordSec){
+          lastRecordSec = elapsedSec;
+          chart.data.labels.push(elapsedSec.toString());
+          chart.data.datasets[0].data.push(db);
+          chart.update('none');
+          csvRows.push([elapsedSec, db.toFixed(3)]);
+        }
+      }
 
+      maybeAlert(db);
       rafId = requestAnimationFrame(loop);
     }
 
     async function startMeasure(){
-      if (isMeasuring) return;
-      isMeasuring = true;
-      startBtn.disabled = true;
+      if (isRunning) return;
+      isRunning = true;
+      startBtn.disabled = true; stopBtn.disabled = false;
       statusEl.textContent = '初始化音訊…';
 
-      await initAudio();
+      if (!audioCtx) await initAudio();
 
-      calBtn.disabled = false;
-      threshSel.disabled = false;
-      alertToggle.disabled = false;
+      calBtn.disabled = false; threshSel.disabled = false; alertToggle.disabled = false; dlBtn.disabled = false;
+
+      // 清空圖表、資料、時間零點
+      chart.data.labels = []; chart.data.datasets[0].data = []; chart.update();
+      csvRows.length = 1; // 保留表頭
+      lastRecordSec = -1; startedAt = performance.now();
 
       await calibrateOneSecond();
 
@@ -282,55 +263,57 @@
       loop();
     }
 
+    function stopMeasure(){
+      if (!isRunning) return;
+      isRunning = false;
+      startBtn.disabled = false; stopBtn.disabled = true;
+      statusEl.textContent = '已停止';
+      if (rafId) cancelAnimationFrame(rafId);
+    }
+
     async function recalibrate(){
       statusEl.textContent = '準備校準…請保持安靜';
-      await new Promise(r => setTimeout(r,300));
+      await new Promise(r=>setTimeout(r,300));
       await calibrateOneSecond();
-      // 清空圖表資料
-      chart.data.labels = [];
-      chart.data.datasets[0].data = [];
-      chart.update();
     }
 
     async function toggleWakeLock(){
       if ('wakeLock' in navigator){
-        try {
+        try{
           if (!wakeLock){
             wakeLock = await navigator.wakeLock.request('screen');
             wakeToggle.textContent = '💡 螢幕常亮：開';
-            wakeLock.addEventListener('release',()=> {
-              wakeToggle.textContent = '💡 螢幕常亮：關';
-              wakeLock = null;
-            });
+            wakeLock.addEventListener('release', ()=>{ wakeToggle.textContent='💡 螢幕常亮：關'; wakeLock=null; });
           } else {
-            await wakeLock.release();
-            wakeLock = null;
-            wakeToggle.textContent = '💡 螢幕常亮：關';
+            await wakeLock.release(); wakeLock=null; wakeToggle.textContent='💡 螢幕常亮：關';
           }
-        } catch(e){
-          alert('此瀏覽器不支援螢幕常亮或目前無法啟用。');
-        }
-      } else {
-        alert('此瀏覽器不支援螢幕常亮 (Screen Wake Lock API)。');
-      }
+        }catch(e){ alert('此瀏覽器不支援螢幕常亮或目前無法啟用。'); }
+      } else { alert('此瀏覽器不支援螢幕常亮 (Screen Wake Lock API)。'); }
+    }
+
+    function downloadCsv(){
+      const blob = new Blob(csvRows.map(r=>r.join(',')).join('\n').split('\n').map(l=>l+'\r\n'), { type:'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href=url; a.download='db_log.csv'; a.click(); URL.revokeObjectURL(url);
     }
 
     startBtn.addEventListener('click', startMeasure);
+    stopBtn.addEventListener('click', stopMeasure);
     calBtn.addEventListener('click', recalibrate);
     threshSel.addEventListener('change', e => setThresholdUI(e.target.value));
     alertToggle.addEventListener('click', async () => {
       alertEnabled = !alertEnabled;
       alertToggle.textContent = alertEnabled ? '🔔 提示已開' : '🔕 提示已關';
       alertToggle.classList.toggle('secondary', alertEnabled);
-      if (alertEnabled) {
-        // 開啟提示同時清空 + 立即校準
+      if (alertEnabled){
+        // 開啟提示時立即清零校準，並清空圖表資料
         await calibrateOneSecond();
-        chart.data.labels = [];
-        chart.data.datasets[0].data = [];
-        chart.update();
+        chart.data.labels = []; chart.data.datasets[0].data = []; chart.update();
+        csvRows.length = 1; lastRecordSec = -1; startedAt = performance.now();
       }
     });
     wakeToggle.addEventListener('click', toggleWakeLock);
+    dlBtn.addEventListener('click', downloadCsv);
 
     setThresholdUI(thresholdDb);
   </script>
