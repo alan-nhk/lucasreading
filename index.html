@@ -1,1 +1,327 @@
-index
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3 秒平均分貝（0 dB校準 + 超標提示 + 常亮 + 圖表）</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { font-family: -apple-system, system-ui, "Segoe UI", Roboto, "Noto Sans TC", Arial, sans-serif; margin:0; padding:24px; background:#0b0f14; color:#e6eef7; }
+    h1 { font-size:20px; margin:0 0 8px; }
+    .row { display:flex; gap:12px; margin:12px 0 12px; flex-wrap:wrap; }
+    button, select {
+      padding:12px 14px; font-size:16px; border-radius:12px; border:none; cursor:pointer;
+      background:#1e88e5; color:#fff;
+    }
+    button.secondary { background:#455a64; }
+    button.ghost { background:transparent; border:1px solid #2b3b53; color:#e6eef7; }
+    select { background:#121821; border:1px solid #223047; color:#e6eef7; }
+    .panel { background:#121821; border:1px solid #223047; border-radius:16px; padding:16px; transition:background 0.3s, border-color 0.3s; }
+    .panel.alert { background:#8d6e00; border-color:#ffeb3b; }
+    .big { font-size:44px; font-weight:700; letter-spacing:0.5px; }
+    .label { opacity:0.8; font-size:14px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .hint { font-size:13px; opacity:0.75; margin-top:10px; line-height:1.45; }
+    .ok { color:#80cbc4; }
+    .warn { color:#ffab91; }
+    .bad { color:#ff8a80; }
+    .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; border:1px solid #2b3b53; margin-left:6px; }
+    .flash { box-shadow:0 0 0 3px rgba(255,87,34,.45) inset; }
+    canvas { display:block; width:100%; height:100px; margin-top:16px; border:1px solid #223047; border-radius:8px; background:#0b0f14; }
+  </style>
+</head>
+<body>
+  <h1>📢 3 秒平均分貝（相對校準 0 dB）</h1>
+
+  <div class="row">
+    <button id="startBtn">開始量度</button>
+    <button id="calBtn" class="secondary" disabled>重新校準（1 秒）</button>
+    <select id="threshSel" title="超標提示閾值" disabled>
+      <option value="15" selected>提示：15 dB</option>
+      <option value="20">提示：20 dB</option>
+      <option value="25">提示：25 dB</option>
+      <option value="30">提示：30 dB</option>
+    </select>
+    <button id="alertToggle" class="ghost" disabled>🔔 提示已關</button>
+    <button id="wakeToggle" class="ghost">💡 螢幕常亮：關</button>
+  </div>
+
+  <div id="panel" class="panel">
+    <div class="label">最近 3 秒平均</div>
+    <div id="dbOut" class="big mono">0.0 dB</div>
+    <div class="label">
+      狀態：<span id="status">未開始</span>
+      <span id="calBadge" class="badge">未校準</span>
+    </div>
+    <div class="label">
+      閾值：<span id="threshLabel" class="ok">15 dB</span>
+    </div>
+  </div>
+
+  <canvas id="dbChart"></canvas>
+
+  <div class="hint">
+    • 第一次開始會自動校準 1 秒，把當前環境定為 <b>0 dB</b>。<br/>
+    • 當你按「🔔 提示已開 → 提示已關」時，會 **立即重新校準背景音量為 0 dB** 並開始監控。<br/>
+    • 若 3 秒平均超過所選閾值（相對於 0 dB）會播放提示聲、背景變黃、並在圖表反映變化。<br/>
+    • 「螢幕常亮」需手動開啟；部分瀏覽器或裝置可能不支援。<br/>
+    • 手機麥克風並非專業儀器，讀數僅供相對比較與教育用途。
+  </div>
+
+  <script>
+    const startBtn   = document.getElementById('startBtn');
+    const calBtn     = document.getElementById('calBtn');
+    const dbOut      = document.getElementById('dbOut');
+    const statusEl   = document.getElementById('status');
+    const calBadge   = document.getElementById('calBadge');
+    const panelEl    = document.getElementById('panel');
+    const threshSel  = document.getElementById('threshSel');
+    const threshText = document.getElementById('threshLabel');
+    const alertToggle= document.getElementById('alertToggle');
+    const wakeToggle = document.getElementById('wakeToggle');
+    const canvas     = document.getElementById('dbChart');
+    const ctx        = canvas.getContext('2d');
+
+    let audioCtx, analyser, source, stream;
+    let refPower = null;
+    let isMeasuring = false;
+    const frameBuf = [];
+    const WINDOW_MS = 3000;
+    const CAL_MS = 1000;
+    let rafId = null;
+
+    let alertEnabled = false;
+    let thresholdDb = 15;
+    let lastBeepAt = 0;
+    const BEEP_COOLDOWN_MS = 2000;
+
+    let wakeLock = null;
+
+    const chartData = [];
+    const MAX_DATA_POINTS = 100;
+
+    function toDbRel(power, refPwr) {
+      if (!refPwr || power <= 0) return -Infinity;
+      return 10 * Math.log10(power / refPwr);
+    }
+
+    async function initAudio() {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+    }
+
+    function computeFramePower() {
+      const buf = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(buf);
+      let sumSq = 0;
+      for (let i=0; i<buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sumSq += v * v;
+      }
+      const rms = Math.sqrt(sumSq / buf.length);
+      return rms * rms;
+    }
+
+    async function calibrateOneSecond() {
+      statusEl.textContent = '校準中（1 秒）…';
+      const tStart = performance.now();
+      let acc = 0, n = 0;
+      return new Promise(resolve => {
+        function tick() {
+          const now = performance.now();
+          const p = computeFramePower();
+          acc += p; n++;
+          if (now - tStart >= CAL_MS) {
+            const meanP = acc / Math.max(1, n);
+            refPower = Math.max(meanP, 1e-12);
+            statusEl.textContent = '已校準：0 dB';
+            calBadge.textContent = '已校準';
+            resolve();
+          } else {
+            requestAnimationFrame(tick);
+          }
+        }
+        requestAnimationFrame(tick);
+      });
+    }
+
+    function setThresholdUI(val) {
+      thresholdDb = Number(val);
+      threshText.textContent = `${thresholdDb} dB`;
+      threshText.classList.remove('ok','warn','bad');
+      if (thresholdDb <= 15) threshText.classList.add('warn');
+      else                  threshText.classList.add('ok');
+    }
+
+    function flashPanel() {
+      panelEl.classList.add('flash');
+      setTimeout(() => panelEl.classList.remove('flash'), 200);
+    }
+
+    function beep() {
+      if (!audioCtx) return;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(1000, now);
+      gain.gain.setValueAtTime(0.5, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.5);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + 0.6);
+    }
+
+    function maybeAlert(db) {
+      if (!alertEnabled || !isFinite(db)) return;
+      const nowMs = performance.now();
+      if (db >= thresholdDb) {
+        panelEl.classList.add('alert');
+        if ((nowMs - lastBeepAt) > BEEP_COOLDOWN_MS) {
+          lastBeepAt = nowMs;
+          flashPanel();
+          beep();
+        }
+      } else {
+        panelEl.classList.remove('alert');
+      }
+    }
+
+    function drawChart() {
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      ctx.clearRect(0,0,w,h);
+      ctx.beginPath();
+      ctx.strokeStyle = '#80cbc4';
+      ctx.lineWidth = 2;
+      const len = chartData.length;
+      for (let i=0; i<len; i++) {
+        const x = i / (MAX_DATA_POINTS - 1) * w;
+        const val = chartData[i];
+        const y = h - ((val + 50) / 100 * h); // 假設範圍 -50 ~ +50 dB
+        if (i === 0) ctx.moveTo(x, y);
+        else        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+
+      const thrY = h - ((thresholdDb + 50) / 100 * h);
+      ctx.beginPath();
+      ctx.strokeStyle = '#ffeb3b';
+      ctx.setLineDash([4,4]);
+      ctx.moveTo(0, thrY);
+      ctx.lineTo(w, thrY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function loop() {
+      const now = performance.now();
+      const p = computeFramePower();
+      frameBuf.push({ t: now, p });
+      while (frameBuf.length && (now - frameBuf[0].t) > WINDOW_MS) frameBuf.shift();
+
+      let sum = 0;
+      for (const it of frameBuf) sum += it.p;
+      const meanP = sum / Math.max(1, frameBuf.length);
+
+      let db = 0.0;
+      if (refPower) {
+        db = toDbRel(meanP, refPower);
+        if (!isFinite(db)) db = 0.0;
+      } else {
+        db = 0.0;
+      }
+      dbOut.textContent = `${db.toFixed(1)} dB`;
+
+      chartData.push(db);
+      if (chartData.length > MAX_DATA_POINTS) chartData.shift();
+      drawChart();
+
+      maybeAlert(db);
+
+      rafId = requestAnimationFrame(loop);
+    }
+
+    async function startMeasure() {
+      if (isMeasuring) return;
+      isMeasuring = true;
+      startBtn.disabled = true;
+      statusEl.textContent = '初始化音訊…';
+
+      await initAudio();
+
+      calBtn.disabled = false;
+      threshSel.disabled = false;
+      alertToggle.disabled = false;
+
+      await calibrateOneSecond();
+
+      statusEl.textContent = '量度中（3 秒平均）';
+      loop();
+    }
+
+    async function recalibrate() {
+      statusEl.textContent = '準備校準…請保持安靜';
+      await new Promise(r => setTimeout(r,300));
+      await calibrateOneSecond();
+    }
+
+    async function toggleWakeLock() {
+      if ('wakeLock' in navigator) {
+        try {
+          if (!wakeLock) {
+            wakeLock = await navigator.wakeLock.request('screen');
+            wakeToggle.textContent = '💡 螢幕常亮：開';
+            wakeLock.addEventListener('release', () => {
+              wakeToggle.textContent = '💡 螢幕常亮：關';
+              wakeLock = null;
+            });
+            document.addEventListener('visibilitychange', async () => {
+              if (document.visibilityState === 'visible' && !wakeLock) {
+                try {
+                  wakeLock = await navigator.wakeLock.request('screen');
+                  wakeToggle.textContent = '💡 螢幕常亮：開';
+                  wakeLock.addEventListener('release', () => {
+                    wakeToggle.textContent = '💡 螢幕常亮：關';
+                    wakeLock = null;
+                  });
+                } catch {}
+              }
+            });
+          } else {
+            await wakeLock.release();
+            wakeLock = null;
+            wakeToggle.textContent = '💡 螢幕常亮：關';
+          }
+        } catch (e) {
+          alert('此瀏覽器不支援螢幕常亮或目前無法啟用。');
+        }
+      } else {
+        alert('此瀏覽器不支援螢幕常亮 (Screen Wake Lock API)。');
+      }
+    }
+
+    startBtn.addEventListener('click', startMeasure);
+    calBtn.addEventListener('click', recalibrate);
+    threshSel.addEventListener('change', e => setThresholdUI(e.target.value));
+    alertToggle.addEventListener('click', async () => {
+      alertEnabled = !alertEnabled;
+      alertToggle.textContent = alertEnabled ? '🔔 提示已開' : '🔕 提示已關';
+      alertToggle.classList.toggle('secondary', alertEnabled);
+      if (alertEnabled) {
+        await calibrateOneSecond();
+      }
+    });
+    wakeToggle.addEventListener('click', toggleWakeLock);
+
+    setThresholdUI(thresholdDb);
+  </script>
+</body>
+</html>
+
