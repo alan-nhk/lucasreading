@@ -29,6 +29,7 @@
     canvas { display:block; width:100%; height:180px; margin-top:16px; border:1px solid #223047; border-radius:8px; background:#0b0f14; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/nosleep.js@0.12.0/dist/NoSleep.min.js"></script>
 </head>
 <body>
   <h1>📢 3 秒平均分貝（相對校準 0 dB）</h1>
@@ -209,7 +210,37 @@
     calBtn.addEventListener('click', recalibrate);
     threshSel.addEventListener('change', e=>setThresholdUI(e.target.value));
     alertToggle.addEventListener('click', async ()=>{ alertEnabled=!alertEnabled; alertToggle.textContent = alertEnabled? '🔔 提示已開':'🔕 提示已關'; alertToggle.classList.toggle('secondary', alertEnabled); if(alertEnabled){ await calibrateOneSecond(); chart.data.labels=[]; chart.data.datasets[0].data=[]; chart.update('none'); startedAt=performance.now(); lastRecordSec=-1; } });
-    wakeToggle.addEventListener('click', toggleWakeLock);
+    // --- smarter wake lock with fallback (Screen Wake Lock → NoSleep.js) ---
+let noSleep = null;
+async function toggleWakeLockSmart(){
+  if ('wakeLock' in navigator && navigator.wakeLock){
+    try{
+      if (!wakeLock){
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeToggle.textContent = '💡 螢幕常亮：開';
+        wakeLock.addEventListener('release', ()=>{ wakeToggle.textContent='💡 螢幕常亮：關'; wakeLock=null; });
+        document.addEventListener('visibilitychange', async ()=>{
+          if (document.visibilityState === 'visible' && !wakeLock){
+            try{ wakeLock = await navigator.wakeLock.request('screen');
+              wakeToggle.textContent='💡 螢幕常亮：開';
+              wakeLock.addEventListener('release', ()=>{ wakeToggle.textContent='💡 螢幕常亮：關'; wakeLock=null; });
+            }catch(_e){}
+          }
+        });
+      } else {
+        await wakeLock.release(); wakeLock=null; wakeToggle.textContent='💡 螢幕常亮：關';
+      }
+      return;
+    }catch(e){ /* fallback below */ }
+  }
+  if (!noSleep) noSleep = new NoSleep();
+  try{
+    if (noSleep._enabled){ noSleep.disable(); wakeToggle.textContent='💡 螢幕常亮：關'; }
+    else { await noSleep.enable(); wakeToggle.textContent='💡 螢幕常亮：開*'; }
+  }catch(e){ console.warn('NoSleep fallback failed:', e); alert('此裝置或瀏覽器限制無法保持常亮。可嘗試：把此頁加入主畫面以全螢幕開啟、關閉省電模式，或改用 Android Chrome。'); }
+}
+
+wakeToggle.addEventListener('click', toggleWakeLockSmart);
 
     setThresholdUI(thresholdDb);
   </script>
